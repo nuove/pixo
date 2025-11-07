@@ -68,7 +68,6 @@ def main():
                 continue
 
             try:
-                # Create a simple "receipt" message
                 result_data = {
                     'job_id': job_id,
                     'status': 'pong',
