@@ -99,7 +99,6 @@ def upload():
                     "tile_data": tile_data_b64
                 }
 
-                # Produce: Send this JSON to the tasks topic
                 kafka_producer.produce(TASK_TOPIC, key=None, value=json.dumps(message))
                 
                 tile_id += 1
