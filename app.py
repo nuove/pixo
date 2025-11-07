@@ -88,7 +88,6 @@ def upload():
                 tile.save(tile_bytes, format='PNG')
                 tile_bytes = tile_bytes.getvalue()
 
-                # Base64 Encode: Convert the tile's image data into a Base64 string
                 tile_data_b64 = base64.b64encode(tile_bytes).decode('utf-8')
 
                 # Create JSON: Create a new JSON message
