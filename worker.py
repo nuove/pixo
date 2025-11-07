@@ -5,13 +5,29 @@ import socket
 import base64 
 import io 
 from PIL import Image
-
-WORKER_ID = '[AAHAN-WORKER]' 
+import os 
 
 BOOTSTRAP_SERVERS = '172.27.247.209:9092' 
 TASK_TOPIC = 'tasks'
 RESULT_TOPIC = 'results'
 GROUP_ID = 'image-processor-group'
+
+def get_worker_id():
+    """
+    Generates a unique worker ID based on:
+    1) Environment variable WORKER_ID
+    2) if not found, then hostname-UUID
+    """
+    env_worker_id = os.getenv("WORKER_ID")
+    if env_worker_id:
+        return env_worker_id
+    try:
+        hostname = socket.gethostname()
+        unique_id = uuid.uuid4().hex[:6]
+        return f"{hostname}-{unique_id}"
+    except Exception as e:
+        print(f"Error generating worker ID: {e}")
+        return f"worker-{uuid.uuid4().hex[:6]}"
 
 def create_consumer(bootstrap_servers, group_id):
     """Creates and configures a Kafka Consumer."""
@@ -44,6 +60,8 @@ def process_image(image_bytes):
     except Exception as e:
         print(f"Error during image processing: {e}")
         return None
+    
+WORKER_ID = get_worker_id()
 
 def main():
     print(f"Starting worker: {WORKER_ID}...")
