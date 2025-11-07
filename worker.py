@@ -6,6 +6,7 @@ import base64
 import io 
 from PIL import Image
 import os 
+import uuid
 
 BOOTSTRAP_SERVERS = '172.27.247.209:9092' 
 TASK_TOPIC = 'tasks'
