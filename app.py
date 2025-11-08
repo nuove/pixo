@@ -2,7 +2,7 @@ import json
 import uuid
 import io
 import base64
-from flask import Flask, request, redirect, render_template
+from flask import Flask, request, redirect, render_template, jsonify, send_from_directory
 from confluent_kafka import Producer
 import redis
 from PIL import Image
@@ -15,7 +15,7 @@ producer = None
 
 # Redis connection with error handling
 try:
-    r = redis.Redis(host='172.27.247.209', port=6379, decode_responses=True)
+    r = redis.Redis(host='localhost', port=6379, decode_responses=True)
     r.ping()
     redis_available = True
     print("Redis connected successfully.")
@@ -67,11 +67,16 @@ def upload():
         r.hset(job_id, 'tile_width', tile_size)
         r.hset(job_id, 'tile_height', tile_size)
         r.hset(job_id, 'grid_width', num_tiles_x)
+        r.hset(job_id, 'original_width', width)
+        r.hset(job_id, 'original_height', height)
+        
 
     # Get Kafka producer
     kafka_producer = get_kafka_producer()
     if kafka_producer is None:
-        return "Error: Kafka Producer is not connected.", 500
+        return jsonify({
+            "error": "Kafka Producer is not connected"
+        }), 500
 
     # Loop & Produce: For each tile
     tile_id = 0
@@ -99,7 +104,7 @@ def upload():
                 }
 
                 kafka_producer.produce(TASK_TOPIC, key=None, value=json.dumps(message))
-                
+
                 tile_id += 1
 
         # ---flushing once after the loop---
@@ -109,11 +114,74 @@ def upload():
         # ----------------------------------
 
     except Exception as e:
-                    print(f"Error sending tile {tile_id}: {e}")
-                    return f"Error sending tile {tile_id}: {e}", 500
+        print(f"Error sending tile {tile_id}: {e}")
+        return jsonify({
+            "error": f"Error sending tile {tile_id}: {e}",
+            "job_id": job_id
+        }), 500
 
     print(f"Successfully sent all {total_tiles} tiles for job {job_id}")
-    return f"Successfully processed image! Job ID: {job_id} with {total_tiles} tiles sent to workers."
+
+    return jsonify({
+        "message": "Successfully processed image!",
+        "job_id": job_id,
+        "total_tiles": total_tiles,
+        "tile_size": tile_size
+    })
+
+@app.route('/status/<job_id>', methods=['GET'])
+@app.route('/api/status/<job_id>', methods=['GET'])
+def job_status(job_id):
+    if not redis_available or r is None:
+        return jsonify({
+            "error": "Redis is not available",
+            "job_id": job_id
+        }), 503
+
+    try:
+        total_tiles = r.hget(job_id, 'total_tiles')
+        received_tiles = r.hget(job_id, 'received_tiles')
+        job_data = r.hgetall(job_id)
+        status = job_data.get("status", "processing")
+    except redis.RedisError as exc:
+        return jsonify({
+            "error": f"Unable to read job status: {exc}",
+            "job_id": job_id
+        }), 500
+
+    if total_tiles is None or received_tiles is None:
+        return jsonify({
+            "error": "Job not found",
+            "job_id": job_id
+        }), 404
+
+    total_tiles = int(total_tiles)
+    received_tiles = int(received_tiles)
+
+    if status == "complete":
+        final_filename = job_data.get('final_filename')
+        return jsonify({
+            "status": "complete",
+            "url": f"/final/{final_filename}"
+        })
+    else:
+        return jsonify({
+            "status": "processing",
+            "total_tiles": total_tiles,
+            "received_tiles": received_tiles
+        })
+
+@app.route('/final/<filename>')
+def serve_final_img(filename):
+    """
+    Catches the URL from the JS (e.g., /final/job-123.jpg)
+    and serves the physical file from the 'final' directory.
+    """
+    print(f"Serving file: {filename} from /final")
+    try:
+        return send_from_directory("final", filename)
+    except FileNotFoundError:
+        return "File not found.", 404
 
 if __name__ == '__main__':
     get_kafka_producer()
