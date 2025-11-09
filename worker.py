@@ -2,15 +2,18 @@ import json
 from confluent_kafka import Consumer, Producer, KafkaError
 import sys
 import socket
-import base64 
-import io 
+import base64
+import io
 from PIL import Image
-import os 
+import os
 import uuid
+import threading  
+import time     
 
-BOOTSTRAP_SERVERS = '172.27.247.209:9092' 
+BOOTSTRAP_SERVERS = '172.27.247.209:9092'
 TASK_TOPIC = 'tasks'
 RESULT_TOPIC = 'results'
+HEARTBEAT_TOPIC = 'heartbeats' 
 GROUP_ID = 'image-processor-group'
 
 def get_worker_id():
@@ -35,7 +38,7 @@ def create_consumer(bootstrap_servers, group_id):
     conf = {
         'bootstrap.servers': bootstrap_servers,
         'group.id': group_id,
-        'auto.offset.reset': 'earliest'
+        'auto.offset.reset': 'latest' 
     }
     return Consumer(conf)
 
@@ -51,31 +54,61 @@ def process_image(image_bytes):
     """
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        
+
         processed_image = image.convert('L')
-        
+
         byte_buffer = io.BytesIO()
         processed_image.save(byte_buffer, format="JPEG")
         return byte_buffer.getvalue()
-        
+
     except Exception as e:
         print(f"Error during image processing: {e}")
         return None
-    
+
 WORKER_ID = get_worker_id()
+
+# heartbeat loop
+def heartbeat_loop():
+    """
+    Runs in a separate thread, sending a heartbeat every 5 seconds now!
+    """
+    print(f"[{WORKER_ID}] Heartbeat thread started.")
+
+    # creates a new producer instance *for this thread*
+    heartbeat_producer = create_producer(BOOTSTRAP_SERVERS)
+
+    heartbeat_data = {
+        "worker_id": WORKER_ID,
+        "status": "alive"
+    }
+
+    while True:
+        try:
+            # add a fresh timestamp for each heartbeat
+            heartbeat_data["timestamp"] = time.time()
+
+            heartbeat_producer.produce(
+                HEARTBEAT_TOPIC,
+                value=json.dumps(heartbeat_data).encode('utf-8')
+            )
+            heartbeat_producer.poll(0)
+        except Exception as e:
+            print(f"[{WORKER_ID}] Heartbeat failed: {e}")
+
+        time.sleep(5)
 
 def main():
     print(f"Starting worker: {WORKER_ID}...")
-    
+
     try:
         consumer = create_consumer(BOOTSTRAP_SERVERS, GROUP_ID)
         producer = create_producer(BOOTSTRAP_SERVERS)
     except Exception as e:
         print(f"Error connecting to Kafka: {e}")
         sys.exit(1)
-        
+
     print(f"Connected to Kafka at {BOOTSTRAP_SERVERS}")
-    
+
     try:
         consumer.subscribe([TASK_TOPIC])
         print(f"Subscribed to topic: {TASK_TOPIC}")
@@ -90,31 +123,31 @@ def main():
                 if msg.error().code() != KafkaError._PARTITION_EOF:
                     print(f"Consumer error: {msg.error()}")
                 continue
-            
+
             try:
                 task = json.loads(msg.value().decode('utf-8'))
                 job_id = task.get('job_id', 'unknown_job')
                 tile_id = task.get('tile_id', 'unknown_tile')
                 tile_data_base64 = task.get('tile_data')
-                
+
                 if not tile_data_base64:
                     print(f"Skipping message for {job_id}: missing 'tile_data'")
                     continue
 
                 print(f"\n[{WORKER_ID}] Received task for Job ID: {job_id}, Tile: {tile_id}")
-                
+
                 image_bytes = base64.b64decode(tile_data_base64)
-                
+
             except Exception as e:
                 print(f"Error decoding message: {e}")
                 continue
 
             processed_image_bytes = process_image(image_bytes)
-            
+
             if processed_image_bytes is None:
                 print(f"Failed to process image for {job_id}, Tile: {tile_id}")
                 continue
-                
+
             processed_data_base64 = base64.b64encode(processed_image_bytes).decode('utf-8')
             print(f"Successfully processed Tile: {tile_id}")
 
@@ -125,15 +158,15 @@ def main():
                     'processed_data': processed_data_base64,
                     'worker_id': WORKER_ID
                 }
-                
+
                 producer.produce(
-                    RESULT_TOPIC, 
-                    key=str(job_id), 
+                    RESULT_TOPIC,
+                    key=str(job_id),
                     value=json.dumps(result_data).encode('utf-8')
                 )
-                producer.flush() 
+                producer.flush()
                 print(f"[{WORKER_ID}] Sent processed tile to topic: {RESULT_TOPIC}")
-                
+
             except Exception as e:
                 print(f"Error producing result: {e}")
 
@@ -144,4 +177,9 @@ def main():
         print("Worker stopped.")
 
 if __name__ == '__main__':
-    main()
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        daemon=True 
+    ) 
+    heartbeat_thread.start() 
+    main() 
