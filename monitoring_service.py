@@ -10,11 +10,13 @@ REDIS_PORT = 6379
 HEARTBEAT_TOPIC = 'heartbeats'
 GROUP_ID = 'monitoring-group-v2'
 
+#A worker is "dead" if it doesn't send a heartbeat for 15s
 WORKER_TTL_SECONDS = 15
 
 def main():
     print("Starting Dynamic Monitoring Service..")
 
+# --- connect to redis ---
     try:
         r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
         r.ping()
@@ -42,6 +44,7 @@ def main():
 
 
     try:
+        # the main consumer loop
         while True:
             msg = consumer.poll(1.0)
             if msg is None:
@@ -50,6 +53,7 @@ def main():
                 print(f"Consumer error: {msg.error()}")
                 continue
 
+            # --- process a received heartbeat ---
             try:
                 data = json.loads(msg.value().decode('utf-8'))
                 worker_id = data.get('worker_id')
@@ -57,6 +61,10 @@ def main():
                 if worker_id:
                     redis_key = f"worker_status:{worker_id}"
 
+                    # This is the core logic:
+                    # 1. SET the worker's key to "alive"
+                    # 2. Set that key to automatically expire (ex) after 15 seconds.
+                    # This is the "dead worker" detection.
                     r.set(redis_key, "alive", ex=WORKER_TTL_SECONDS)
                     print(f"Refreshed heartbeat for: {worker_id}")
 
