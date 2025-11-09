@@ -3,13 +3,14 @@ from confluent_kafka import Consumer, KafkaError
 import sys
 import os
 import base64
-import io
 import redis
 from PIL import Image
+import time
+import logging
 
-BOOTSTRAP_SERVERS = '172.27.247.209:9092' # broker
+# ----------------- CONFIG -----------------
+BOOTSTRAP_SERVERS = '172.27.247.209:9092'
 RESULT_TOPIC = 'results'
-HEARTBEAT_TOPIC = 'heartbeats'
 GROUP_ID = 'master-results-group'
 
 REDIS_HOST = 'localhost'
@@ -18,90 +19,96 @@ REDIS_PORT = 6379
 PROCESSED_DIR = 'processed'
 FINAL_DIR = 'final'
 
+# ----------------- LOGGING -----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger(__name__)
+
+
+# ----------------- KAFKA & REDIS -----------------
 def create_consumer(bootstrap_servers, group_id):
-    """Creates and new_configs a Kafka Consumer."""
-    conf = {
+    """Create Kafka Consumer."""
+    return Consumer({
         'bootstrap.servers': bootstrap_servers,
         'group.id': group_id,
         'auto.offset.reset': 'earliest'
-    }
-    return Consumer(conf)
+    })
+
 
 def connect_to_redis():
-    """Connects to Redis server."""
+    """Connect to Redis."""
     try:
         r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
         r.ping()
-        print(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
+        log.info(f"Connected to Redis at {REDIS_HOST}:{REDIS_PORT}")
         return r
     except redis.exceptions.ConnectionError as e:
-        print(f"Error connecting to Redis: {e}")
-        print("!!! Make sure Redis server is running. !!!")
+        log.critical(f"Redis connection failed: {e}")
         sys.exit(1)
 
-def stitch_tiles(r, job_id):
-    """
-    Stitches processed tiles back into a final image.
-    Reads job metadata from Redis.
-    """
-    try:
-        print(f"Job {job_id} complete! Starting image stitching...")
-        
-        job_data = r.hgetall(job_id)
-        
-        if not job_data:
-            print(f"Stitching Error: No metadata found in Redis for {job_id}")
-            return
 
-        # Decode values from Redis (which returns strings)
+# ----------------- STITCHING -----------------
+def stitch_tiles(r, job_id):
+    """Stitch processed tiles into final image."""
+    log.info(f"[{job_id}] Stitching started")
+
+    job_data = r.hgetall(job_id)
+    if not job_data:
+        log.error(f"[{job_id}] No metadata found in Redis")
+        return
+
+    try:
         total_tiles = int(job_data.get('total_tiles', 0))
         grid_width = int(job_data.get('grid_width', 0))
-        tile_width = int(job_data.get('tile_width', 0))
-        tile_height = int(job_data.get('tile_height', 0))
-
-        final_width = int(job_data.get('original_width', 0))
-        final_height = int(job_data.get('original_height', 0))
-        
-        if grid_width == 0 or tile_width == 0 or tile_height == 0 or final_width == 0 or final_height == 0:
-            print(f"Stitching Error: Incomplete metadata for {job_id}. Missing grid/tile info.")
-            return
-
-        grid_height = total_tiles // grid_width
-        
-        final_image = Image.new('L', (final_width, final_height))
-        print(f"Created new canvas for {job_id}: {final_image.width}x{final_image.height}")
-
-        for i in range(total_tiles):
-            tile_path = os.path.join(PROCESSED_DIR, job_id, f"tile_{i}.jpg")
-            
-            if not os.path.exists(tile_path):
-                print(f"Stitching Error: Missing tile {tile_path}")
-                continue
-                
-            with Image.open(tile_path) as tile_img:
-                x = (i % grid_width) * tile_width
-                y = (i // grid_width) * tile_height
-                final_image.paste(tile_img, (x, y))
-
-        os.makedirs(FINAL_DIR, exist_ok=True)
-        final_filename = f"{job_id}_complete.jpg"
-        final_path = os.path.join(FINAL_DIR, final_filename)
-        final_image.save(final_path)
-        print(f"=== Stitching complete! Final image saved to: {final_path} ===")
-
-        try:
-            r.hset(job_id, "status", "complete")
-            r.hset(job_id, "final_filename", final_filename)
-            print(f"Updated Redis: {job_id} is now 'complete'")
-        except Exception as e:
-            print(f"Error updating Redis status for {job_id}: {e}")
-
+        tile_w = int(job_data.get('tile_width', 0))
+        tile_h = int(job_data.get('tile_height', 0))
+        final_w = int(job_data.get('original_width', 0))
+        final_h = int(job_data.get('original_height', 0))
     except Exception as e:
-        print(f"Error during stitching for {job_id}: {e}")
+        log.error(f"[{job_id}] Metadata decode error: {e}")
+        return
 
+    if not all([total_tiles, grid_width, tile_w, tile_h, final_w, final_h]):
+        log.error(f"[{job_id}] Missing grid/tile/final dimensions")
+        return
+
+    final_img = Image.new('L', (final_w, final_h))
+    missing = 0
+
+    for i in range(total_tiles):
+        path = os.path.join(PROCESSED_DIR, job_id, f"tile_{i}.jpg")
+        if not os.path.exists(path):
+            missing += 1
+            continue
+
+        with Image.open(path) as tile:
+            x = (i % grid_width) * tile_w
+            y = (i // grid_width) * tile_h
+            final_img.paste(tile, (x, y))
+
+    os.makedirs(FINAL_DIR, exist_ok=True)
+    final_path = os.path.join(FINAL_DIR, f"{job_id}_complete.jpg")
+
+    # timing before saving
+    t0 = time.perf_counter()
+    final_img.save(final_path)
+    save_ms = (time.perf_counter() - t0) * 1000
+
+    log.info(f"[{job_id}] Final image saved: {final_path} ({save_ms:.1f} ms) missing_tiles={missing}")
+
+    try:
+        r.hset(job_id, mapping={"status": "complete", "final_filename": os.path.basename(final_path)})
+        log.info(f"[{job_id}] Redis updated: status=complete")
+    except Exception as e:
+        log.error(f"[{job_id}] Failed to update Redis: {e}")
+
+
+# ----------------- MAIN LOOP -----------------
 def main():
-    print("Starting Full-Featured Results Service...")
-    
+    log.info("Result service starting...")
     os.makedirs(PROCESSED_DIR, exist_ok=True)
     os.makedirs(FINAL_DIR, exist_ok=True)
 
@@ -109,71 +116,88 @@ def main():
         consumer = create_consumer(BOOTSTRAP_SERVERS, GROUP_ID)
         r = connect_to_redis()
     except Exception as e:
-        print(f"Error during initialization: {e}")
+        log.critical(f"Initialization failed: {e}")
         sys.exit(1)
-        
-    print(f"Connected to Kafka at {BOOTSTRAP_SERVERS}")
-    
-    try:
-        consumer.subscribe([RESULT_TOPIC])
-        print(f"Subscribed to topics: {RESULT_TOPIC}")
-        print("Waiting for results...")
 
+    log.info(f"Connected to Kafka broker {BOOTSTRAP_SERVERS}")
+    consumer.subscribe([RESULT_TOPIC])
+    log.info(f"Subscribed to topic: {RESULT_TOPIC}")
+
+    try:
         while True:
             msg = consumer.poll(1.0)
 
             if msg is None:
                 continue
+
             if msg.error():
                 if msg.error().code() != KafkaError._PARTITION_EOF:
-                    print(f"Consumer error: {msg.error()}")
+                    log.warning(f"Kafka error: {msg.error()}")
                 continue
-            
-            topic = msg.topic()
-            msg_value_str = msg.value().decode('utf-8')
-            
+
             try:
-                data = json.loads(msg_value_str)
-            except json.JSONDecodeError:
-                print(f"[ResultsSvc] Error: Could not decode JSON: {msg_value_str}")
+                data = json.loads(msg.value().decode('utf-8'))
+            except Exception:
+                log.warning("Received invalid JSON message")
                 continue
 
-            if topic == RESULT_TOPIC:
-                try:
-                    job_id = data.get('job_id')
-                    tile_id = data.get('tile_id')
-                    processed_data_b64 = data.get('processed_data')
+            job_id = data.get('job_id')
+            tile_id = data.get('tile_id')
+            tile_b64 = data.get('processed_data')
 
-                    if not all([job_id, tile_id is not None, processed_data_b64]):
-                        print(f"[ResultsSvc] Error: Incomplete data in message: {data}")
-                        continue
-                    
-                    tile_bytes = base64.b64decode(processed_data_b64)
-                    job_dir = os.path.join(PROCESSED_DIR, job_id)
-                    os.makedirs(job_dir, exist_ok=True)
-                    tile_filename = f"tile_{tile_id}.jpg" 
-                    tile_path = os.path.join(job_dir, tile_filename)
-                    
-                    with open(tile_path, 'wb') as f:
-                        f.write(tile_bytes)
-                    
-                    received_count = r.hincrby(job_id, "received_tiles", 1)
-                    print(f"[ResultsSvc] Saved tile {tile_id} for {job_id}. Total received: {received_count}")
-                    
-                    job_metadata = r.hgetall(job_id)
-                    total_count = int(job_metadata.get('total_tiles', 0))
+            if not all([job_id, tile_id is not None, tile_b64]):
+                log.warning("Received incomplete tile data")
+                continue
 
-                    if total_count > 0 and received_count == total_count:
-                        stitch_tiles(r, job_id)
-                    
-                except Exception as e:
-                    print(f"[ResultsSvc] Error processing result: {e}")
+            # timing before decode
+            t0 = time.perf_counter()
+            try:
+                tile_bytes = base64.b64decode(tile_b64)
+            except Exception as e:
+                log.error(f"[{job_id}] Base64 decode failed: {e}")
+                continue
+            decode_ms = (time.perf_counter() - t0) * 1000
+
+            job_dir = os.path.join(PROCESSED_DIR, job_id)
+            os.makedirs(job_dir, exist_ok=True)
+
+            tile_path = os.path.join(job_dir, f"tile_{tile_id}.jpg")
+
+            # timing before writing file
+            w0 = time.perf_counter()
+            try:
+                with open(tile_path, 'wb') as f:
+                    f.write(tile_bytes)
+            except Exception as e:
+                log.error(f"[{job_id}] Error writing tile: {e}")
+                continue
+            write_ms = (time.perf_counter() - w0) * 1000
+
+            # timing before redis update
+            r0 = time.perf_counter()
+            received = r.hincrby(job_id, "received_tiles", 1)
+            total = int(r.hget(job_id, "total_tiles") or 0)
+            redis_ms = (time.perf_counter() - r0) * 1000
+
+            log.info(
+                f"[{job_id}] Tile {tile_id} saved ({len(tile_bytes)}B) "
+                f"decode={decode_ms:.1f}ms write={write_ms:.1f}ms redis={redis_ms:.1f}ms "
+                f"received={received}/{total}"
+            )
+
+            if total > 0 and received == total:
+                # timing before stitching
+                s0 = time.perf_counter()
+                stitch_tiles(r, job_id)
+                stitch_ms = (time.perf_counter() - s0) * 1000
+                log.info(f"[{job_id}] Stitching completed in {stitch_ms:.1f} ms")
 
     except KeyboardInterrupt:
-        print("\nStopping results service...")
+        log.info("Stopping results service...")
     finally:
         consumer.close()
-        print("Service stopped.")
+        log.info("Service stopped.")
+
 
 if __name__ == '__main__':
     main()
