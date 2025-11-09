@@ -5,10 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Distributed Image Processor</title>
-    <!-- We will use Tailwind CSS for a clean, modern UI -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        /* A simple spinning loader for the submit button */
         .loader {
             border-top-color: #3498db;
             animation: spin 1s linear infinite;
@@ -19,50 +17,60 @@
                 transform: rotate(360deg);
             }
         }
+
+        .worker-status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .worker-card {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            background-color: #4A5568;
+            /* bg-gray-700 */
+            text-align: center;
+        }
+
+        .worker-alive {
+            color: #48BB78;
+            /* text-green-400 */
+        }
+
+        .worker-dead {
+            color: #F56565;
+            /* text-red-400 */
+        }
     </style>
 </head>
 
 <body class="bg-gray-900 text-gray-100 font-sans p-8">
     <div class="max-w-4xl mx-auto">
 
-        <!-- Header -->
         <header class="text-center mb-12">
             <h1 class="text-4xl font-bold text-white mb-2">Kafka Image Processor</h1>
             <p class="text-lg text-gray-400">Upload an image to apply a filter using a distributed Kafka pipeline.</p>
         </header>
 
-        <!-- Uploader Section -->
         <div class="bg-gray-800 p-8 rounded-xl shadow-2xl mb-12">
             <h2 class="text-2xl font-semibold mb-6 text-white">1. Upload Image</h2>
 
-            <!-- This form is handled by our JavaScript -->
             <form id="upload-form" class="space-y-6">
                 <div>
                     <label for="image" class="block text-sm font-medium text-gray-300 mb-2">Select Image File (PNG,
                         JPG)</label>
                     <input type="file" name="image" id="image" required class="block w-full text-sm text-gray-400
-                               file:mr-4 file:py-2 file:px-4
-                               file:rounded-lg file:border-0
-                               file:text-sm file:font-semibold
-                               file:bg-indigo-600 file:text-white
-                               hover:file:bg-indigo-700
-                               cursor-pointer" />
+                                file:mr-4 file:py-2 file:px-4
+                                file:rounded-lg file:border-0
+                                file:text-sm file:font-semibold
+                                file:bg-indigo-600 file:text-white
+                                hover:file:bg-indigo-700
+                                cursor-pointer" />
                 </div>
-
-                <!-- We can add the filter selection here later (Phase 5) -->
-                <!-- <div>
-                    <label for="filter-type" class="block text-sm font-medium text-gray-300 mb-2">Select Filter</label>
-                    <select id="filter-type" name="filter_type" class="w-full bg-gray-700 border-gray-600 text-white rounded-lg p-2.5">
-                        <option value="grayscale">Grayscale</option>
-                        <option value="blur" disabled>Blur (Coming Soon)</option>
-                        <option value="sharpen" disabled>Sharpen (Coming Soon)</option>
-                    </select>
-                </div> -->
 
                 <button type="submit" id="submit-button"
                     class="w-full flex justify-center items-center px-6 py-3 border border-transparent text-base font-medium rounded-lg text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50">
                     <span id="submit-text">Process Image</span>
-                    <!-- This loader will appear when processing -->
                     <div id="submit-loader"
                         class="loader w-5 h-5 rounded-full border-2 border-gray-200 border-t-indigo-500 ml-3 hidden">
                     </div>
@@ -70,30 +78,39 @@
             </form>
         </div>
 
-        <!-- Dashboard Section -->
-        <div id="dashboard" class="bg-gray-800 p-8 rounded-xl shadow-2xl mt-12" style="display: none;">
-            <h2 class="text-2xl font-semibold mb-4 text-white">2. Job Dashboard</h2>
-            <p class="text-sm text-gray-300 mb-4">Job ID: <span id="job-id-display" class="font-mono text-indigo-300">...</span></p>
+        <div id="worker-dashboard" class="bg-gray-800 p-8 rounded-xl shadow-2xl mb-12" style="display: none;">
+            <h2 class="text-2xl font-semibold mb-4 text-white">2. Worker Status</h2>
+            <div id="worker-status-display" class="worker-status-grid">
+                <p class="text-gray-400">Waiting for first status update...</p>
+            </div>
+        </div>
+
+        <div id="progress-dashboard" class="bg-gray-800 p-8 rounded-xl shadow-2xl mt-12" style="display: none;">
+            <h2 class="text-2xl font-semibold mb-4 text-white">3. Job Progress</h2>
+            <p class="text-sm text-gray-300 mb-4">Job ID: <span id="job-id-display"
+                    class="font-mono text-indigo-300">...</span></p>
 
             <p id="progress-text" class="text-base text-gray-300 mb-2">Processing: 0 / 0</p>
             <progress id="progress-bar" value="0" max="100" class="w-full h-3 rounded bg-gray-700"></progress>
 
             <div id="result-display" class="mt-6 text-center" style="display: none;">
                 <h3 class="text-xl font-semibold text-green-400 mb-3">Processing Complete!</h3>
-                <img id="final-image" src="" alt="Processed Image" class="mx-auto max-w-full rounded-lg border border-gray-700">
+                <img id="final-image" src="" alt="Processed Image"
+                    class="mx-auto max-w-full rounded-lg border border-gray-700">
             </div>
         </div>
     </div>
 
-    <!-- JavaScript Logic -->
     <script>
-        // Get references to all our important DOM elements
         const uploadForm = document.getElementById('upload-form');
         const submitButton = document.getElementById('submit-button');
         const submitText = document.getElementById('submit-text');
         const submitLoader = document.getElementById('submit-loader');
 
-        const dashboard = document.getElementById('dashboard');
+        const workerDashboard = document.getElementById('worker-dashboard');
+        const workerStatusDisplay = document.getElementById('worker-status-display');
+        const progressDashboard = document.getElementById('progress-dashboard');
+
         const jobIdDisplay = document.getElementById('job-id-display');
         const progressBar = document.getElementById('progress-bar');
         const progressText = document.getElementById('progress-text');
@@ -103,22 +120,14 @@
         let currentJobId = null;
         let pollingInterval = null;
 
-        // 1. Handle the form submission
         uploadForm.addEventListener('submit', async (e) => {
-            e.preventDefault(); // Stop the form from doing a normal browser refresh
+            e.preventDefault();
 
-            // Show loading state
             setLoading(true);
 
-            // Get the form data (the file)
             const formData = new FormData(uploadForm);
 
-            // We can add the filter type to formData later if we add the dropdown
-            // const filterType = document.getElementById('filter-type').value;
-            // formData.append('filter_type', filterType);
-
             try {
-                // Send the image to the /upload endpoint on your Flask server
                 const response = await fetch('/upload', {
                     method: 'POST',
                     body: formData,
@@ -147,27 +156,27 @@
             }
         });
 
-        // 2. Start polling for the job status
         function startPolling(jobId) {
             if (pollingInterval) {
                 clearInterval(pollingInterval);
             }
 
-            dashboard.style.display = 'block';
+            workerDashboard.style.display = 'block';
+            progressDashboard.style.display = 'block';
+            workerStatusDisplay.innerHTML = '<p class="text-gray-400">Waiting for first status update...</p>';
+
             jobIdDisplay.textContent = jobId;
             progressBar.value = 0;
             progressText.textContent = 'Processing: 0 / 0';
             resultDisplay.style.display = 'none';
             finalImage.src = '';
 
-            // Poll immediately, then continue every 2 seconds
             pollJobStatus(jobId);
             pollingInterval = setInterval(() => {
                 pollJobStatus(jobId);
             }, 2000);
         }
 
-        // 3. Poll the /status endpoint
         async function pollJobStatus(jobId) {
             if (!jobId) {
                 return;
@@ -188,6 +197,8 @@
                     return;
                 }
 
+                updateWorkerStatus(data.workers || {});
+
                 if (data.status === 'complete') {
                     showCompletion(data);
                 } else {
@@ -200,6 +211,35 @@
                 setLoading(false);
             }
         }
+
+        function updateWorkerStatus(workers) {
+            workerStatusDisplay.innerHTML = '';
+
+            const workerIds = Object.keys(workers);
+
+            if (workerIds.length === 0) {
+                workerStatusDisplay.innerHTML = '<p class="text-gray-400">No workers detected.</p>';
+                return;
+            }
+
+            for (const [worker_id, status] of Object.entries(workers)) {
+                const workerCard = document.createElement('div');
+                workerCard.className = 'worker-card';
+
+                const idElement = document.createElement('p');
+                idElement.textContent = worker_id;
+                idElement.className = 'font-mono text-sm mb-1 text-gray-200 truncate';
+
+                const statusElement = document.createElement('p');
+                statusElement.textContent = status.toUpperCase();
+                statusElement.className = (status === 'alive') ? 'worker-alive font-bold' : 'worker-dead font-bold';
+
+                workerCard.appendChild(idElement);
+                workerCard.appendChild(statusElement);
+                workerStatusDisplay.appendChild(workerCard);
+            }
+        }
+
 
         function updateProgress(received, total) {
             const percentage = total > 0 ? Math.floor((received / total) * 100) : 0;
@@ -234,7 +274,6 @@
             }
         }
 
-        // 4. Helper to manage the submit button's loading state
         function setLoading(isLoading) {
             if (isLoading) {
                 submitButton.disabled = true;
