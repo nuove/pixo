@@ -91,7 +91,7 @@ def heartbeat_loop():
                 HEARTBEAT_TOPIC,
                 value=json.dumps(heartbeat_data).encode('utf-8')
             )
-            producer.poll(0)
+            heartbeat_producer.poll(0)
         except Exception as e:
             print(f"[{WORKER_ID}] Heartbeat failed: {e}")
 
