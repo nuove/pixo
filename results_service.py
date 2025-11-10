@@ -7,6 +7,7 @@ import redis
 from PIL import Image
 import time
 import logging
+import threading
 
 # ----------------- CONFIG -----------------
 BOOTSTRAP_SERVERS = '172.27.247.209:9092'
@@ -53,7 +54,8 @@ def connect_to_redis():
 # ----------------- STITCHING -----------------
 def stitch_tiles(r, job_id):
     """Stitch processed tiles into final image."""
-    log.info(f"[{job_id}] Stitching started")
+    log.info(f"[{job_id}] Stitching thread started...")
+    s0 = time.perf_counter()
 
     job_data = r.hgetall(job_id)
     if not job_data:
@@ -92,12 +94,8 @@ def stitch_tiles(r, job_id):
     os.makedirs(FINAL_DIR, exist_ok=True)
     final_path = os.path.join(FINAL_DIR, f"{job_id}_complete.jpg")
 
-    # timing before saving
-    t0 = time.perf_counter()
-    final_img.save(final_path)
-    save_ms = (time.perf_counter() - t0) * 1000
-
-    log.info(f"[{job_id}] Final image saved: {final_path} ({save_ms:.1f} ms) missing_tiles={missing}")
+    stitch_ms = (time.perf_counter() - s0) * 1000
+    log.info(f"[{job_id}] Stitching completed in {stitch_ms:.1f} ms. Final image saved: {final_path} (missing_tiles={missing})")
 
     try:
         r.hset(job_id, mapping={"status": "complete", "final_filename": os.path.basename(final_path)})
@@ -186,11 +184,14 @@ def main():
             )
 
             if total > 0 and received == total:
-                # timing before stitching
-                s0 = time.perf_counter()
-                stitch_tiles(r, job_id)
-                stitch_ms = (time.perf_counter() - s0) * 1000
-                log.info(f"[{job_id}] Stitching completed in {stitch_ms:.1f} ms")
+                log.info(f"[{job_id}] All tiles received. Starting stitch thread.")
+
+                stitching_thread = threading.Thread(
+                    target=stitch_tiles,
+                    args=(r, job_id,),
+                    daemon=True
+                )
+                stitching_thread.start()
 
     except KeyboardInterrupt:
         log.info("Stopping results service...")
