@@ -1,4 +1,4 @@
-# Distributed Image Processing System with Kafka
+# Pixo
 
 A scalable distributed image processing system that uses Apache Kafka for message queuing, Redis for state management, and Flask for the web interface. The system splits images into tiles, processes them in parallel using distributed workers, and stitches them back together.
 
@@ -11,15 +11,7 @@ The system consists of four main components:
 3. **Results Service** (`results_service.py`) - Collects processed tiles and stitches final images
 4. **Monitoring Service** (`monitoring_service.py`) - Tracks worker health via heartbeats
 
-### Data Flow
-
-```
-User Upload → Flask App → Kafka (tasks topic) → Workers → Kafka (results topic) → Results Service → Final Image
-                    ↓                               ↓
-                  Redis                     Kafka (heartbeats topic)
-                                                    ↓
-                                            Monitoring Service
-```
+![Pixo Architecture](/assets/architecture.png "Optional title")
 
 ## 📋 Prerequisites
 
@@ -34,14 +26,10 @@ User Upload → Flask App → Kafka (tasks topic) → Workers → Kafka (results
 ### Step 1: Install Python Dependencies
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
-
-The required packages include:
-- `confluent-kafka` - Kafka client library
-- `Flask` - Web framework
-- `Pillow` - Image processing
-- `redis` - Redis client
 
 ### Step 2: Start Kafka Infrastructure
 
@@ -190,108 +178,55 @@ WORKER_TTL_SECONDS = 15  # Worker considered dead after 15 seconds without heart
 
 ```
 .
-├── app.py                    # Flask web application
-├── worker.py                 # Distributed worker nodes
-├── results_service.py        # Results collection and image stitching
-├── monitoring_service.py     # Worker health monitoring
-├── requirements.txt          # Python dependencies
-├── LICENSE                   # Project license
-├── README.md                 # This file
+├── app.py                  # Flask web application
+├── worker.py               # Distributed worker nodes
+├── results_service.py      # Results collection and image stitching
+├── monitoring_service.py   # Worker health monitoring
+├── requirements.txt        # Python dependencies
+├── LICENSE                 # Project license
+├── README.md               # This file (which links to assets/architecture.png)
+├── assets/
+│   └── architecture.png
 ├── templates/
-│   └── index.html           # Web interface
-├── processed/               # Temporary processed tiles (auto-created)
+│   └── index.html          # Web interface
+├── processed/              # Temporary processed tiles (auto-created)
 │   └── <job-id>/
 │       └── tile_*.jpg
-└── final/                   # Final stitched images (auto-created)
+└── final/                  # Final stitched images (auto-created)
     └── <job-id>_complete.jpg
 ```
 
-## 🐛 Troubleshooting
+# 🚀 Deployment & Team Setup
+This project is designed to run on a distributed, 4-node (PC) cluster. Here is the recommended mapping of services to systems:
 
-### Kafka Connection Issues
-```
-Error: Unable to connect to Kafka broker
-```
-**Solution:** 
-- Verify Kafka is running: `jps` (should show `Kafka`)
-- Check `BOOTSTRAP_SERVERS` IP address is correct
-- Ensure firewall allows connections on port 9092
+### System 1 (Web & State):
 
-### Redis Connection Issues
-```
-Error connecting to Redis
-```
-**Solution:**
-- Check Redis is running: `redis-cli ping` (should return `PONG`)
-- Verify Redis host and port in configuration files
-- Check Redis is listening on the correct interface
+`redis-server (The central Redis database)`
+`python app.py (The Flask web application)`
 
-### No Workers Detected
-```
-Worker Status: No workers detected
-```
-**Solution:**
-- Ensure at least one `worker.py` instance is running
-- Check Kafka topic `tasks` exists
-- Verify workers can connect to Kafka broker
-- Check `monitoring_service.py` is running and connected
+### System 2 (Broker & Results):
 
-### Image Not Processing
 ```
-Job stuck at "Processing: 0 / X"
+zookeeper-server-start.sh (Kafka's ZooKeeper)
+kafka-server-start.sh (The Kafka Broker)
+python results_service.py (The results collector & image stitcher)
 ```
-**Solution:**
-- Verify `worker.py` instances are running and consuming from `tasks` topic
-- Check `results_service.py` is running and consuming from `results` topic
-- Review worker logs for processing errors
-- Ensure Redis is accessible to both Flask app and results service
+### System 3 (Worker 1):
 
-## 🔍 Kafka Topic Verification
+`python worker.py (An instance of the processing worker)`
 
-### List all topics
-```bash
-cd /opt/kafka
-bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+### System 4 (Worker 2 & Monitoring):
+
+```
+python worker.py (A second instance of the processing worker)
+python monitoring_service.py (The worker heartbeat monitor)
 ```
 
-### Describe a topic
-```bash
-bin/kafka-topics.sh --describe --topic tasks --bootstrap-server localhost:9092
-```
+>**Note:** All systems must be on the same network (e.g., connected via ZeroTier or on the same LAN) and all IP addresses in the scripts must be updated to point to the correct system's IP.
 
-### Monitor topic messages
-```bash
-# Watch tasks being produced
-bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic tasks --from-beginning
+# 📈 A Note on Scalability
+This 4-node setup is just an example. The architecture is horizontally scalable.
 
-# Watch results being consumed
-bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic results --from-beginning
+You can add more `worker.py` instances on new machines at any time. The Kafka consumer group `(image-processor-group)` will automatically discover and load-balance tasks to them.
 
-# Watch worker heartbeats
-bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic heartbeats --from-beginning
-```
-
-## 📊 Monitoring
-
-### Redis Keys
-
-The system uses Redis to track:
-- `<job_id>` - Hash containing job metadata (total_tiles, received_tiles, status, etc.)
-- `worker_status:<worker_id>` - Worker health status (auto-expires after 15 seconds)
-
-### Check Redis data
-```bash
-redis-cli
-
-# List all job keys
-KEYS job-*
-
-# View job details
-HGETALL job-abc123
-
-# List active workers
-KEYS worker_status:*
-
-# Check specific worker
-GET worker_status:worker-1
-```
+>**Important:** To scale beyond 2 workers, you must increase the partition count on the tasks topic. The number of partitions is the maximum number of parallel consumers you can have. If you want 10 workers, you must re-create the tasks topic with at least 10 partitions.
